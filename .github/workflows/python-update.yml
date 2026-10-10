@@ -67,8 +67,12 @@ jobs:
       - name: Verify release and update Dockerfile
         if: steps.existing.outputs.skip != 'true'
         run: |
-          python3 -m pip install --quiet sigstore==4.5.0
-          python3 .github/scripts/check_python_release.py apply "$VERSION"
+          # Isolated venv: installed into the runner's system Python, sigstore
+          # imports Ubuntu's boto3/pyOpenSSL, which break against the newer
+          # cryptography it pulls in.
+          python3 -m venv "$RUNNER_TEMP/sigstore"
+          "$RUNNER_TEMP/sigstore/bin/pip" install --quiet sigstore==4.5.0
+          "$RUNNER_TEMP/sigstore/bin/python" .github/scripts/check_python_release.py apply "$VERSION"
 
       - name: Open PR and start test build
         if: steps.existing.outputs.skip != 'true'
