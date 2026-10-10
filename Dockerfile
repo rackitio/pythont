@@ -7,19 +7,20 @@
 # following the official docker-library/python recipe
 # (https://github.com/docker-library/python) with --disable-gil added.
 #
-# To pick up a new free-threaded release: update PYTHON_VERSION and
-# PYTHON_SHA256 below (the sha256 is published alongside each release at
-# https://www.python.org/downloads/release/python-<version digits>/),
-# commit, and push a tag matching the new version (e.g. v3.14.8) --
-# .github/workflows/release.yml builds and publishes it from there.
+# PYTHON_VERSION / PYTHON_SHA256 are bumped by
+# .github/workflows/python-update.yml, which opens a PR after verifying the
+# tarball's sha256 and Sigstore signature. Merging that PR publishes the
+# stable channel (.github/workflows/release.yml); see README.md.
 FROM debian:trixie-slim
 
 ENV PATH=/usr/local/bin:$PATH
 
 # Runtime deps for the build below -- kept manually-marked so the later
 # apt-mark/purge dance (which drops build-only packages) doesn't sweep
-# these up.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# these up. The upgrade pulls in Debian security fixes that landed after
+# the debian:trixie-slim base image was last published.
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
     ca-certificates \
     netbase \
     tzdata \

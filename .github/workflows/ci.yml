@@ -1,0 +1,20 @@
+# Test build (both architectures, no push) for PRs. python-update.yml also
+# dispatches this on its branches, because PRs opened with GITHUB_TOKEN
+# don't trigger pull_request workflows.
+name: ci
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .github/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      channel: test

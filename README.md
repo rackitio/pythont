@@ -1,7 +1,8 @@
 # pythont
 
 Free-threaded (`--disable-gil`) CPython, built from source on
-`debian:trixie-slim`, published as a Docker base image.
+`debian:trixie-slim`, published as a Docker base image at
+[`rackitio/pythont`](https://hub.docker.com/r/rackitio/pythont).
 
 No official Python Docker image ships a free-threaded ("t") build for any
 version — this repo exists to fill that gap with a small, reproducible
@@ -14,29 +15,50 @@ CPython has supported free-threaded builds since 3.13 (PEP 703), but the
 official `python` images on Docker Hub have never shipped a `t`-suffixed
 variant for any version. This repo's [Dockerfile](Dockerfile) follows the
 [official docker-library/python recipe](https://github.com/docker-library/python)
-with `--disable-gil` added, so it tracks the same build flags, optimization
-settings, and multi-arch support as the images it's modeled on.
+with `--disable-gil` added, so it tracks the same build flags and
+optimization settings as the images it's modeled on.
 
-## Supported tags
+## Tags
 
-| Tag | Description |
+There are two channels:
+
+- **stable** is built once per Python release and then never changes.
+- **weekly** is rebuilt every Monday from the same Python version to pick up
+  Debian security fixes.
+
+| Tag | Channel | Updated when | Moves to a new minor version? |
+|---|---|---|---|
+| `stable`, `latest` | stable | a new Python release (patch or minor) | **yes** |
+| `X.Y` (e.g. `3.14`) | stable | a new patch release of X.Y | no |
+| `X.Y.Z` (e.g. `3.14.8`) | stable | never (built once) | no |
+| `weekly` | weekly | every Monday, and on each stable release | **yes** |
+| `X.Y.Z-weekly` (e.g. `3.14.8-weekly`) | weekly | every Monday until X.Y.Z+1 ships, then frozen | no |
+
+When a new Python version is released, the weekly channel resets to it as
+well, so `weekly` is always the stable Python version with the newest
+Debian packages.
+
+Images are multi-arch (`linux/amd64`, `linux/arm64`).
+
+### Which tag should I use?
+
+| You want | Use |
 |---|---|
-| `latest`, `X.Y.Z`, `X.Y` | Built from the corresponding `vX.Y.Z` release tag, where the version matches the free-threaded CPython release it contains |
+| Security fixes, no surprise Python upgrades | `3.14` (Python patches) or `3.14.8-weekly` (Debian patches, until the next Python patch) |
+| Always the newest of everything | `weekly` |
+| A build that never changes | `3.14.8`, or pin any tag by digest (`rackitio/pythont@sha256:…`; digests are in each GitHub release) |
 
-Images are multi-arch (`linux/amd64`, `linux/arm64`) and rebuilt only on
-tagged releases — `latest` always tracks the newest published build, never
-an unreleased commit.
+**Don't follow `latest`, `stable` or `weekly` in production** unless you're
+ready for a minor-version jump. When Python 3.15 ships, those tags move to
+it. C extensions built for 3.14 (`cp314t` wheels) won't load on 3.15, and
+some standard-library modules get removed between minor versions. `3.14`
+and `3.14.Z-weekly` never leave 3.14.
 
 ## Usage
 
 ```dockerfile
-FROM <dockerhub-namespace>/pythont:3.14.7 AS base
+FROM rackitio/pythont:3.14
 ```
-
-Pin an exact version (`3.14.7`) rather than floating on `latest` or a
-`3.14`-style minor tag if your project needs reproducible builds — a new
-`pythont` release changes the interpreter your image builds against with
-no corresponding change in your own repo's history.
 
 `PYTHON_GIL` is **not** set by this image — it ships CPython's own stock
 free-threaded default (the GIL auto-reenables itself if an imported C
@@ -49,24 +71,76 @@ something this image should presume on everyone's behalf.
 ## Verifying the build
 
 ```bash
-docker run --rm <dockerhub-namespace>/pythont:3.14.7 \
+docker run --rm rackitio/pythont:3.14 \
   python3 -c "import sys; print(sys.version); print('GIL enabled:', sys._is_gil_enabled())"
 ```
 
 Should print a free-threading build identifier and `GIL enabled: False`.
 
-## Bumping the Python version
+## What changed in each build
 
-1. Update `PYTHON_VERSION` and `PYTHON_SHA256` in the [Dockerfile](Dockerfile)
-   — the sha256 is published alongside each release on
-   [python.org/downloads](https://www.python.org/downloads/).
-2. Commit and push a tag matching the new version, e.g.:
-   ```bash
-   git tag v3.14.8
-   git push origin v3.14.8
-   ```
-3. `.github/workflows/release.yml` builds and publishes `3.14.8`, `3.14`,
-   and `latest` from that tag.
+Every published build gets a
+[GitHub release](https://github.com/rackitio/pythont/releases):
+`vX.Y.Z` for stable, `weekly-YYYYMMDD` (pre-release) for weekly. The notes
+list:
+
+- the Python version change, with a changelog link;
+- every Debian package added, removed or upgraded compared with the image
+  the tag pointed to before;
+- a Trivy vulnerability scan before and after, listing CVEs fixed, newly
+  reported, and still open.
+
+### Known open CVEs
+
+Trivy reports a few CVEs in `msgpack`, `setuptools` and `urllib3`. These
+are the copies pip bundles inside itself (`pip/_vendor`), not packages
+installed in the image, and they're only reachable when pip itself runs.
+They clear when pip ships a release with updated bundled libraries. Most
+Debian CVEs listed have no Debian fix yet. The weekly build picks up fixes
+as Debian publishes them.
+
+## How releases happen
+
+| Workflow | Trigger | Does |
+|---|---|---|
+| [python-update](.github/workflows/python-update.yml) | daily | Checks python.org for a new stable release. Verifies the tarball's sha256 and Sigstore signature, opens a PR bumping the [Dockerfile](Dockerfile), and runs a test build on it. |
+| [ci](.github/workflows/ci.yml) | PRs | Test-builds both architectures without publishing. |
+| [release](.github/workflows/release.yml) | push to `main` that changes `PYTHON_VERSION` (i.e. merging an update PR) | Publishes the stable channel and creates the `vX.Y.Z` release. |
+| [weekly](.github/workflows/weekly.yml) | Mondays 06:00 UTC | Rebuilds the current version and publishes the weekly channel. |
+| [dockerhub-description](.github/workflows/dockerhub-description.yml) | push to `main` that changes [DOCKERHUB.md](DOCKERHUB.md) | Updates the Docker Hub overview page. |
+
+Each build runs natively per architecture with no layer cache, so every
+image gets current Debian packages. `release` and `weekly` can also be run
+by hand from the Actions tab.
+
+### Releasing a new Python version
+
+1. python-update opens a PR titled **Bump Python to X.Y.Z** (or an issue
+   of the same name with a one-click link to create that PR; see
+   [Repository setup](#repository-setup)). A new minor version gets a
+   warning in the PR body, because merging moves `stable`, `latest` and
+   `weekly` to it.
+2. Wait for the **ci** check to pass, then merge.
+3. release publishes the images and the `vX.Y.Z` release notes.
+
+To bump by hand, run
+`python3 .github/scripts/check_python_release.py apply X.Y.Z` (needs
+`pip install sigstore`) and open a PR. Before a new minor version's first
+release, add its release manager's Sigstore identity to `SIGNERS` in
+[check_python_release.py](.github/scripts/check_python_release.py), from
+[python.org/downloads/metadata/sigstore](https://www.python.org/downloads/metadata/sigstore/).
+
+### Repository setup
+
+- Secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. The token needs
+  **Read, Write & Delete** scope if dockerhub-description should work;
+  Read & Write is enough for pushing images.
+- Optional: Settings → Actions → General → **Allow GitHub Actions to
+  create and approve pull requests**, so python-update can open PRs
+  itself. In the rackitio organization an org owner has to allow this at
+  the org level first (the repo checkbox is greyed out until they do).
+  While it's off, python-update opens an issue with a link that creates the
+  PR pre-filled.
 
 ## License & issues
 

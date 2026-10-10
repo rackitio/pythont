@@ -1,0 +1,121 @@
+# Checks python.org daily for new stable CPython releases. For each one
+# (newest patch of the current minor, and the newest release of a newer
+# minor), it verifies the tarball's sha256 and Sigstore signature, pushes a
+# branch bumping the Dockerfile, dispatches ci.yml on it, and opens a PR.
+# Merging the PR triggers release.yml, which publishes the stable channel.
+#
+# Opening the PR needs "Allow GitHub Actions to create and approve pull
+# requests" (Settings → Actions → General; in an organization, an org owner
+# must allow it first). While that's off, the job opens an issue instead,
+# with a link that creates the PR pre-filled.
+name: python-update
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      versions: ${{ steps.check.outputs.versions }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Look for new releases
+        id: check
+        run: |
+          versions="$(python3 .github/scripts/check_python_release.py candidates)"
+          echo "Candidates: $versions"
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+
+  propose:
+    needs: check
+    if: needs.check.outputs.versions != '[]'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.check.outputs.versions) }}
+    env:
+      VERSION: ${{ matrix.version }}
+      BRANCH: python-update/${{ matrix.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Skip if already proposed
+        id: existing
+        run: |
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            echo "$BRANCH already exists; not opening another PR"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify release and update Dockerfile
+        if: steps.existing.outputs.skip != 'true'
+        run: |
+          python3 -m pip install --quiet sigstore==4.5.0
+          python3 .github/scripts/check_python_release.py apply "$VERSION"
+
+      - name: Open PR and start test build
+        if: steps.existing.outputs.skip != 'true'
+        run: |
+          old="$(git show HEAD:Dockerfile | sed -n 's/^ENV PYTHON_VERSION=//p')"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git commit -am "Bump Python to $VERSION"
+          git push origin "$BRANCH"
+
+          minor_note=""
+          if [ "${old%.*}" != "${VERSION%.*}" ]; then
+            minor_note="
+          > [!WARNING]
+          > **New minor version (${old%.*} → ${VERSION%.*}).** Merging moves \`stable\`, \`latest\` and \`weekly\` to ${VERSION%.*}. C extensions built for ${old%.*} won't load in images that follow those tags. The \`${old%.*}\` tag stops updating.
+          "
+          fi
+
+          cat > body.md <<EOF
+          Python **$old → $VERSION** ([changelog](https://docs.python.org/release/$VERSION/whatsnew/changelog.html)).
+          $minor_note
+          - Source tarball sha256 matches python.org: \`$(sed -n 's/^ENV PYTHON_SHA256=//p' Dockerfile)\`
+          - Sigstore signature verified against the ${VERSION%.*} release manager's identity
+          - Test build (amd64 + arm64): see the **ci** check on this PR
+
+          **Merging this PR publishes the stable channel** (\`$VERSION\`, \`${VERSION%.*}\`, \`stable\`, \`latest\`, \`$VERSION-weekly\`, \`weekly\`). The release notes list every Debian package that changed.
+          EOF
+
+          gh workflow run ci.yml --ref "$BRANCH"
+
+          title="Bump Python to $VERSION"
+          if gh pr create --base main --head "$BRANCH" --title "$title" --body-file body.md; then
+            exit 0
+          fi
+
+          # GitHub Actions isn't allowed to open PRs here (repo or org
+          # setting). Hand off through an issue with a pre-filled PR link.
+          compare="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...$BRANCH?expand=1&title=$(jq -rn --arg s "$title" '$s|@uri')&body=$(jq -rn --rawfile s body.md '$s|@uri')"
+          {
+            echo "Python $VERSION is out. The branch \`$BRANCH\` has the verified Dockerfile bump, and its test build is running ([ci runs]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/ci.yml?query=branch%3A$BRANCH))."
+            echo
+            echo "**[Create the pull request]($compare)**. The title and description are already filled in. Merging it publishes the stable channel; close this issue then."
+            echo
+            echo "GitHub Actions couldn't open the PR itself because \"Allow GitHub Actions to create and approve pull requests\" is off for this repository or its organization."
+            echo
+            echo "---"
+            echo
+            cat body.md
+          } > issue.md
+          gh issue create --title "$title" --body-file issue.md

@@ -1,0 +1,233 @@
+# Reusable build: called by release.yml (stable), weekly.yml (weekly) and
+# ci.yml (test, no push).
+#
+# Each architecture builds natively (ubuntu-24.04 / ubuntu-24.04-arm) --
+# PGO+LTO under QEMU took ~3.5h, natively it's ~15 min per arch in
+# parallel. Per-arch images are pushed by digest only; the publish job then
+# diffs the new image against the one currently on the channel's tag
+# (Debian packages + Trivy) for the release notes, and only after that
+# moves the tags.
+#
+# Builds always run with no-cache + pull: the point of every build is to
+# pick up current Debian packages, and a cached `apt-get upgrade` layer
+# would silently reuse stale ones.
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: stable | weekly | test
+        type: string
+        required: true
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+
+env:
+  # Pinned by digest (Trivy 0.75.0) -- don't float a scanner image.
+  TRIVY_IMAGE: aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read Python version
+        id: version
+        run: echo "python=$(sed -n 's/^ENV PYTHON_VERSION=//p' Dockerfile)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: inputs.channel != 'test'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build (test only)
+        if: inputs.channel == 'test'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          pull: true
+          no-cache: true
+          load: true
+          tags: pythont:test
+
+      - name: Build and push by digest
+        id: build
+        if: inputs.channel != 'test'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          pull: true
+          no-cache: true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.python }}
+          outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/pythont,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Smoke test
+        env:
+          IMAGE: ${{ inputs.channel == 'test' && 'pythont:test' || format('{0}/pythont@{1}', secrets.DOCKERHUB_USERNAME, steps.build.outputs.digest) }}
+          PYTHON_VERSION: ${{ steps.version.outputs.python }}
+        run: |
+          docker run --rm -e PYTHON_VERSION "$IMAGE" python -c '
+          import os, platform, sys, ssl, sqlite3
+          assert platform.python_version() == os.environ["PYTHON_VERSION"], platform.python_version()
+          assert not sys._is_gil_enabled(), "GIL is enabled"
+          print(sys.version, "|", ssl.OPENSSL_VERSION, "| sqlite", sqlite3.sqlite_version)
+          '
+          docker run --rm "$IMAGE" pip --version
+
+      - name: Save digest
+        if: inputs.channel != 'test'
+        run: |
+          mkdir -p digests
+          echo "${{ steps.build.outputs.digest }}" > "digests/${{ matrix.arch }}"
+
+      - name: Upload digest
+        if: inputs.channel != 'test'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/${{ matrix.arch }}
+          retention-days: 1
+
+  publish:
+    if: inputs.channel != 'test'
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Work out tags
+        id: tags
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/pythont
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          ver="$(sed -n 's/^ENV PYTHON_VERSION=//p' Dockerfile)"
+          minor="${ver%.*}"
+          # A stable release is also the freshest patched build, so it
+          # resets the weekly channel to the new version immediately.
+          if [ "$CHANNEL" = stable ]; then
+            tags="$ver $minor stable latest $ver-weekly weekly"
+            # Compare against the previous stable release; fall back to
+            # latest for the first run of this scheme.
+            previous="stable latest"
+          else
+            tags="$ver-weekly weekly"
+            previous="weekly stable latest"
+          fi
+          old_ref=""
+          for t in $previous; do
+            if docker buildx imagetools inspect "$IMAGE:$t" >/dev/null 2>&1; then
+              old_ref="$IMAGE:$t"; break
+            fi
+          done
+          {
+            echo "image=$IMAGE"
+            echo "python=$ver"
+            echo "tags=$tags"
+            echo "old_ref=$old_ref"
+            echo "new_ref=$IMAGE@$(cat digests/amd64)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compare with the image being replaced
+        env:
+          OLD: ${{ steps.tags.outputs.old_ref }}
+          NEW: ${{ steps.tags.outputs.new_ref }}
+        run: |
+          pkgs() { docker run --rm --platform linux/amd64 "$1" dpkg-query -W -f='${Package}\t${Version}\n'; }
+          scan() { docker run --rm -v "$HOME/.cache/trivy:/root/.cache/trivy" "$TRIVY_IMAGE" image --quiet --scanners vuln --platform linux/amd64 --format json "$1"; }
+          pkgs "$NEW" > new-packages.txt
+          scan "$NEW" > new-trivy.json
+          : > old-packages.txt; : > old-trivy.json; : > old-python.txt
+          if [ -n "$OLD" ]; then
+            pkgs "$OLD" > old-packages.txt
+            docker run --rm --platform linux/amd64 "$OLD" python3 -c 'import platform; print(platform.python_version())' > old-python.txt
+            scan "$OLD" > old-trivy.json
+          fi
+
+      - name: Write release notes
+        env:
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          python3 .github/scripts/release_notes.py \
+            --channel "$CHANNEL" \
+            --image "${{ steps.tags.outputs.image }}" \
+            --digest "$(cat digests/amd64)" \
+            --tags "${{ steps.tags.outputs.tags }}" \
+            --python-new "${{ steps.tags.outputs.python }}" \
+            --python-old "$(cat old-python.txt)" \
+            --old-ref "${{ steps.tags.outputs.old_ref }}" \
+            --old-packages old-packages.txt --new-packages new-packages.txt \
+            --old-trivy old-trivy.json --new-trivy new-trivy.json \
+            > notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create multi-arch manifest and move tags
+        env:
+          IMAGE: ${{ steps.tags.outputs.image }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+        run: |
+          read -ra tags <<< "$TAGS"
+          args=()
+          for t in "${tags[@]}"; do args+=(-t "$IMAGE:$t"); done
+          docker buildx imagetools create "${args[@]}" "$IMAGE@$(cat digests/amd64)" "$IMAGE@$(cat digests/arm64)"
+          docker buildx imagetools inspect "$IMAGE:${tags[0]}"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel }}
+          PYTHON: ${{ steps.tags.outputs.python }}
+        run: |
+          if [ "$CHANNEL" = stable ]; then
+            tag="v$PYTHON"; title="Python $PYTHON (stable)"; flags=(--latest)
+          else
+            tag="weekly-$(date -u +%Y%m%d)"; title="Python $PYTHON weekly $(date -u +%Y-%m-%d)"; flags=(--prerelease --latest=false)
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes-file notes.md
+          else
+            gh release create "$tag" --target "$GITHUB_SHA" --title "$title" --notes-file notes.md "${flags[@]}"
+          fi

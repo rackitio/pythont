@@ -1,0 +1,35 @@
+# Pushes DOCKERHUB.md to the Docker Hub repository's overview page.
+#
+# DOCKERHUB_TOKEN needs Read, Write & Delete scope for this endpoint (Read &
+# Write is enough for pushing images but not for editing the description).
+name: dockerhub-description
+
+on:
+  push:
+    branches: [main]
+    paths: [DOCKERHUB.md]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update Docker Hub overview
+        env:
+          USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          jwt="$(jq -n --arg u "$USERNAME" --arg t "$TOKEN" '{identifier: $u, secret: $t}' \
+            | curl -sSf -H 'Content-Type: application/json' --data @- https://hub.docker.com/v2/auth/token \
+            | jq -r .access_token)"
+          jq -n --rawfile full DOCKERHUB.md \
+            '{full_description: $full, description: "Free-threaded (no-GIL) CPython on Debian trixie-slim, stable and weekly-patched"}' \
+            | curl -sSf -X PATCH -H "Authorization: Bearer $jwt" -H 'Content-Type: application/json' \
+                --data @- "https://hub.docker.com/v2/repositories/$USERNAME/pythont/" >/dev/null
+          echo "Docker Hub overview updated"

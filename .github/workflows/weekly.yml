@@ -1,0 +1,23 @@
+# Weekly channel: rebuilds the current Python version every Monday to pick
+# up Debian security fixes, and publishes X.Y.Z-weekly and weekly. Each run
+# creates a weekly-YYYYMMDD pre-release whose notes list the Debian package
+# and CVE changes since the previous weekly image.
+name: weekly
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  weekly:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build.yml
+    with:
+      channel: weekly
+    secrets: inherit
