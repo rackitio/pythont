@@ -10,6 +10,8 @@ Source, build recipe and release notes:
 
 ## Tags
 
+One Python version is built at a time, the newest stable release:
+
 - **stable** is built once per Python release and then never changes.
 - **weekly** is rebuilt every Monday from the same Python version to pick
   up Debian security fixes.
@@ -17,23 +19,25 @@ Source, build recipe and release notes:
 | Tag | Updated when | Moves to a new minor version? |
 |---|---|---|
 | `stable`, `latest` | a new Python release | **yes** |
-| `3.14` | a new 3.14.x release | no |
-| `3.14.8` | never (built once) | no |
+| `3.15` | a new 3.15.x release; frozen once 3.16 ships | no |
+| `3.15.0` | never (built once) | no |
 | `weekly` | every Monday, and on each stable release | **yes** |
-| `3.14.8-weekly` | every Monday until 3.14.9 ships | no |
+| `3.15.0-weekly` | every Monday until the next Python release, then frozen | no |
 
-**For production, use `3.14`** (or `3.14.Z-weekly` for weekly Debian
-fixes). `latest`, `stable` and `weekly` jump to Python 3.15 when it ships,
-and C extensions built for 3.14 won't load on 3.15.
+**For production, pin a minor version such as `3.15`** (or `3.15.Z-weekly`
+for weekly Debian fixes). `latest`, `stable` and `weekly` jump to each new
+minor version, and C extensions built for one minor won't load on the next.
+**Older minor versions are frozen**: when 3.16 ships here, `3.15` stops
+getting updates, so move up yourself.
 
 ## Usage
 
 ```dockerfile
-FROM rackitio/pythont:3.14
+FROM rackitio/pythont:3.15
 ```
 
 ```bash
-docker run --rm rackitio/pythont:3.14 \
+docker run --rm rackitio/pythont:3.15 \
   python3 -c "import sys; print(sys.version, 'GIL enabled:', sys._is_gil_enabled())"
 ```
 
