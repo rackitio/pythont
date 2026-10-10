@@ -26,8 +26,8 @@ RUN apt-get update && apt-get upgrade -y \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-ENV PYTHON_VERSION=3.14.8
-ENV PYTHON_SHA256=c2215904f02b175596dc49351585104f4bc20341e1c47378b26a2c274360ce73
+ENV PYTHON_VERSION=3.15.0
+ENV PYTHON_SHA256=ba4bed1ba346b916890b76d9e320451420aa69f6408997d33c66482eeae3d575
 
 RUN set -eux; \
     savedAptMark="$(apt-mark showmanual)"; \
