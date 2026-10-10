@@ -50,6 +50,7 @@ jobs:
     env:
       VERSION: ${{ matrix.version }}
       BRANCH: python-update/${{ matrix.version }}
+      ALL_VERSIONS: ${{ needs.check.outputs.versions }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
@@ -66,8 +67,12 @@ jobs:
       - name: Verify release and update Dockerfile
         if: steps.existing.outputs.skip != 'true'
         run: |
-          python3 -m pip install --quiet sigstore==4.5.0
-          python3 .github/scripts/check_python_release.py apply "$VERSION"
+          # Isolated venv: installed into the runner's system Python, sigstore
+          # imports Ubuntu's boto3/pyOpenSSL, which break against the newer
+          # cryptography it pulls in.
+          python3 -m venv "$RUNNER_TEMP/sigstore"
+          "$RUNNER_TEMP/sigstore/bin/pip" install --quiet sigstore==4.5.0
+          "$RUNNER_TEMP/sigstore/bin/python" .github/scripts/check_python_release.py apply "$VERSION"
 
       - name: Open PR and start test build
         if: steps.existing.outputs.skip != 'true'
@@ -83,7 +88,17 @@ jobs:
           if [ "${old%.*}" != "${VERSION%.*}" ]; then
             minor_note="
           > [!WARNING]
-          > **New minor version (${old%.*} → ${VERSION%.*}).** Merging moves \`stable\`, \`latest\` and \`weekly\` to ${VERSION%.*}. C extensions built for ${old%.*} won't load in images that follow those tags. The \`${old%.*}\` tag stops updating.
+          > **New minor version (${old%.*} → ${VERSION%.*}).** Merging moves \`stable\`, \`latest\` and \`weekly\` to ${VERSION%.*}. C extensions built for ${old%.*} won't load in images that follow those tags. The \`${old%.*}\` tag and \`${old%.*}.Z-weekly\` tags freeze: no more ${old%.*} releases are built.
+          "
+          fi
+
+          # Candidates are oldest first. If a newer one was proposed in the
+          # same run, this one has to be merged before it.
+          newer="$(echo "$ALL_VERSIONS" | jq -r --arg v "$VERSION" '.[(index($v) + 1):] | join(", ")')"
+          if [ -n "$newer" ]; then
+            minor_note="$minor_note
+          > [!IMPORTANT]
+          > **Merge this before Python $newer** (proposed separately). Releases can't move backwards, so once $newer is released this bump is refused. Merging $VERSION first gives the \`${VERSION%.*}\` tag its final patch release. Then delete the \`python-update/$newer\` branch and re-run python-update to rebase it.
           "
           fi
 

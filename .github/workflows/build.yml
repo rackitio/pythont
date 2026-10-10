@@ -31,7 +31,28 @@ env:
   TRIVY_IMAGE: aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
 
 jobs:
+  # stable/latest/weekly must never move backwards: refuse to publish a
+  # Python version older than the newest vX.Y.Z release (e.g. a 3.14.8
+  # bump merged after 3.15.0). Re-publishing the newest version is fine.
+  guard:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Refuse to publish an older Python version
+        if: inputs.channel != 'test'
+        run: |
+          ver="$(sed -n 's/^ENV PYTHON_VERSION=//p' Dockerfile)"
+          newest="$(git ls-remote --tags --refs origin 'v*' | sed -n 's#.*refs/tags/v\([0-9]*\.[0-9]*\.[0-9]*\)$#\1#p' | sort -V | tail -1)"
+          if [ -n "$newest" ] && [ "$(printf '%s\n%s\n' "$ver" "$newest" | sort -V | tail -1)" != "$ver" ]; then
+            echo "::error::Dockerfile has Python $ver but v$newest is already released. Publishing would move tags backwards; set PYTHON_VERSION to $newest or newer."
+            exit 1
+          fi
+          echo "Python $ver is not older than the newest release (${newest:-none})"
+
   build:
+    needs: guard
     strategy:
       fail-fast: true
       matrix:

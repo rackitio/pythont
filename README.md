@@ -20,7 +20,8 @@ optimization settings as the images it's modeled on.
 
 ## Tags
 
-There are two channels:
+This repo builds **one Python version at a time**, the newest stable
+release, in two channels:
 
 - **stable** is built once per Python release and then never changes.
 - **weekly** is rebuilt every Monday from the same Python version to pick up
@@ -29,35 +30,44 @@ There are two channels:
 | Tag | Channel | Updated when | Moves to a new minor version? |
 |---|---|---|---|
 | `stable`, `latest` | stable | a new Python release (patch or minor) | **yes** |
-| `X.Y` (e.g. `3.14`) | stable | a new patch release of X.Y | no |
-| `X.Y.Z` (e.g. `3.14.8`) | stable | never (built once) | no |
+| `X.Y` (e.g. `3.15`) | stable | a new patch release of X.Y; **frozen** once the next minor ships | no |
+| `X.Y.Z` (e.g. `3.15.0`) | stable | never (built once) | no |
 | `weekly` | weekly | every Monday, and on each stable release | **yes** |
-| `X.Y.Z-weekly` (e.g. `3.14.8-weekly`) | weekly | every Monday until X.Y.Z+1 ships, then frozen | no |
+| `X.Y.Z-weekly` (e.g. `3.15.0-weekly`) | weekly | every Monday until the next Python release, then **frozen** | no |
 
 When a new Python version is released, the weekly channel resets to it as
-well, so `weekly` is always the stable Python version with the newest
-Debian packages.
+well, so `weekly` is always the current Python version with the newest
+Debian packages. Tags never move backwards to an older Python version.
 
 Images are multi-arch (`linux/amd64`, `linux/arm64`).
+
+### Older minor versions are frozen
+
+When a new minor version (e.g. 3.16) is released here, the previous
+minor's tags (`3.15`, `3.15.Z-weekly`) **stop updating**. They get no
+further Python patch releases or Debian security fixes from this repo.
+Downstream projects have to move to the new minor version themselves.
 
 ### Which tag should I use?
 
 | You want | Use |
 |---|---|
-| Security fixes, no surprise Python upgrades | `3.14` (Python patches) or `3.14.8-weekly` (Debian patches, until the next Python patch) |
+| Security fixes, no surprise Python upgrades | `X.Y` (e.g. `3.15`) for Python patches, or `X.Y.Z-weekly` for Debian patches too. Move to the next minor yourself when it ships, since these tags freeze then. |
 | Always the newest of everything | `weekly` |
-| A build that never changes | `3.14.8`, or pin any tag by digest (`rackitio/pythont@sha256:…`; digests are in each GitHub release) |
+| A build that never changes | `X.Y.Z`, or pin any tag by digest (`rackitio/pythont@sha256:…`; digests are in each GitHub release) |
 
 **Don't follow `latest`, `stable` or `weekly` in production** unless you're
-ready for a minor-version jump. When Python 3.15 ships, those tags move to
-it. C extensions built for 3.14 (`cp314t` wheels) won't load on 3.15, and
-some standard-library modules get removed between minor versions. `3.14`
-and `3.14.Z-weekly` never leave 3.14.
+ready for a minor-version jump. When a new minor version ships, those tags
+move to it. C extensions built for the old minor (e.g. `cp314t` wheels)
+won't load on the new one, and some standard-library modules get removed
+between minor versions. Watch the
+[releases](https://github.com/rackitio/pythont/releases) to know when an
+`X.Y` tag you use has frozen.
 
 ## Usage
 
 ```dockerfile
-FROM rackitio/pythont:3.14
+FROM rackitio/pythont:3.15
 ```
 
 `PYTHON_GIL` is **not** set by this image — it ships CPython's own stock
@@ -71,7 +81,7 @@ something this image should presume on everyone's behalf.
 ## Verifying the build
 
 ```bash
-docker run --rm rackitio/pythont:3.14 \
+docker run --rm rackitio/pythont:3.15 \
   python3 -c "import sys; print(sys.version); print('GIL enabled:', sys._is_gil_enabled())"
 ```
 
@@ -119,9 +129,16 @@ by hand from the Actions tab.
    of the same name with a one-click link to create that PR; see
    [Repository setup](#repository-setup)). A new minor version gets a
    warning in the PR body, because merging moves `stable`, `latest` and
-   `weekly` to it.
+   `weekly` to it and freezes the old minor's tags.
 2. Wait for the **ci** check to pass, then merge.
 3. release publishes the images and the `vX.Y.Z` release notes.
+
+If a patch release and a new minor arrive together (e.g. 3.14.8 and
+3.15.0), the patch PR says so. **Merge the patch first**, so the old
+minor's tags freeze on its final patch. Merging it after the new minor is
+refused, because tags never move backwards. The new minor's branch will
+then conflict: delete its `python-update/X.Y.Z` branch and re-run
+python-update to recreate it.
 
 To bump by hand, run
 `python3 .github/scripts/check_python_release.py apply X.Y.Z` (needs
